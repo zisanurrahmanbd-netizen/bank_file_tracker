@@ -1,0 +1,399 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  password  String?
+  name      String
+  phone     String?
+  role      UserRole @default(AGENT)
+  status    UserStatus @default(ACTIVE)
+  language  String   @default("en")
+  settings  Json?
+  
+  // Auth fields
+  emailVerified DateTime?
+  supabaseId    String?  @unique
+  
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  agentProfile  Agent?
+  updates       Update[]
+  collections   Collection[]
+  eventLogs     EventLog[]
+  
+  @@map("users")
+}
+
+model Bank {
+  id              String   @id @default(uuid())
+  name            String
+  code            String   @unique
+  contactEmail    String?
+  contactPhone    String?
+  commissionRules Json?    // { "rate": 2.5, "tiers": [...] }
+  slaSettings     Json?    // { "depositHours": 48, "updateDays": 7 }
+  isActive        Boolean  @default(true)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  accounts      Account[]
+  batches       Batch[]
+  agents        Agent[]
+  weeklyReports WeeklyReport[]
+  
+  @@map("banks")
+}
+
+model Agent {
+  id            String     @id @default(uuid())
+  userId        String     @unique
+  employeeId    String?    @unique
+  bankId        String?
+  territory     String?
+  targetMonthly Decimal?   @db.Decimal(15,2)
+  commissionRate Decimal?  @db.Decimal(5,2)
+  isActive      Boolean    @default(true)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bank          Bank?      @relation(fields: [bankId], references: [id])
+  assignments   Assignment[]
+  
+  @@map("agents")
+}
+
+model Account {
+  id                String    @id @default(uuid())
+  bankId            String
+  fileNo            String
+  clientName        String
+  contactPhone      String?
+  contactPhone2     String?
+  address           String?
+  product           String?
+  month             String?
+  allocationDate    DateTime?
+  expiryDate        DateTime?
+  workOrderExpiry   DateTime?
+  outstandingAmount Decimal   @db.Decimal(15,2)
+  overdueAmount     Decimal   @db.Decimal(15,2)
+  emiAmount         Decimal?  @db.Decimal(15,2)
+  statusStage       String    @default("New")
+  lastContactDate   DateTime?
+  
+  // Computed fields
+  totalCollected    Decimal   @default(0) @db.Decimal(15,2)
+  collectionRate    Decimal   @default(0) @db.Decimal(5,2)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  bank         Bank         @relation(fields: [bankId], references: [id])
+  assignments  Assignment[]
+  updates      Update[]
+  collections  Collection[]
+  
+  @@unique([bankId, fileNo])
+  @@index([bankId, statusStage])
+  @@index([allocationDate])
+  @@index([expiryDate])
+  @@map("accounts")
+}
+
+model Batch {
+  id          String      @id @default(uuid())
+  bankId      String
+  fileName    String
+  fileSize    Int
+  totalRows   Int
+  processedRows Int      @default(0)
+  status      BatchStatus @default(PENDING)
+  mapping     Json?       // Column mapping template
+  rawData     Json        // Original CSV/XLSX data
+  summary     Json?       // Import summary stats
+  errorLog    Json?       // Import errors
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  bank      Bank       @relation(fields: [bankId], references: [id])
+  diffs     BatchDiff[]
+  
+  @@map("batches")
+}
+
+model BatchDiff {
+  id        String @id @default(uuid())
+  batchId   String
+  operation String // CREATE, UPDATE, DELETE
+  rowData   Json   // The changed row data
+  oldData   Json?  // Previous data for UPDATEs
+  
+  createdAt DateTime @default(now())
+  
+  // Relations
+  batch Batch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  
+  @@map("batch_diffs")
+}
+
+model Assignment {
+  id        String @id @default(uuid())
+  accountId String
+  agentId   String
+  assignedAt DateTime @default(now())
+  isActive  Boolean  @default(true)
+  
+  // Relations
+  account Account @relation(fields: [accountId], references: [id])
+  agent   Agent   @relation(fields: [agentId], references: [id])
+  
+  @@unique([accountId, agentId])
+  @@map("assignments")
+}
+
+model Update {
+  id           String     @id @default(uuid())
+  accountId    String
+  userId       String
+  visitType    VisitType
+  visitDate    DateTime
+  remarks      String?
+  ptpAmount    Decimal?   @db.Decimal(15,2)
+  ptpDate      DateTime?
+  address      String?
+  gpsLocation  Json?      // { lat, lng }
+  proofImages  String[]   // Array of Supabase storage paths
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  account Account @relation(fields: [accountId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+  
+  @@index([accountId])
+  @@index([visitDate])
+  @@map("updates")
+}
+
+model Collection {
+  id            String           @id @default(uuid())
+  accountId     String
+  submittedBy   String
+  type          CollectionType
+  amount        Decimal          @db.Decimal(15,2)
+  collectionDate DateTime
+  
+  // Type-specific fields
+  txnId         String?          // For bkash/nagad
+  slipNo        String?          // For bank_deposit
+  cashReceipt   String?          // For cash
+  
+  // Verification
+  status        CollectionStatus @default(PENDING)
+  verifiedBy    String?
+  verifiedAt    DateTime?
+  rejectionReason String?
+  
+  // Reconciliation
+  isMatched     Boolean         @default(false)
+  matchedAt     DateTime?
+  matchSource   String?         // webhook, manual, statement
+  
+  // Proof
+  proofImages   String[]        // Supabase storage paths
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  account      Account @relation(fields: [accountId], references: [id])
+  submitter    User    @relation(fields: [submittedBy], references: [id])
+  
+  @@unique([txnId, type]) // Prevent duplicate txn_id per provider
+  @@index([accountId])
+  @@index([collectionDate])
+  @@index([status])
+  @@map("collections")
+}
+
+model ReconciliationItem {
+  id         String @id @default(uuid())
+  provider   String // bkash, nagad, bank_deposit
+  txnId      String
+  amount     Decimal @db.Decimal(15,2)
+  txnDate    DateTime
+  rawData    Json   // Original webhook/statement data
+  
+  // Matching
+  isMatched  Boolean @default(false)
+  matchedCollectionId String?
+  matchedAt  DateTime?
+  matchScore Decimal? @db.Decimal(3,2) // Confidence score
+  
+  createdAt DateTime @default(now())
+  
+  @@unique([provider, txnId])
+  @@index([isMatched])
+  @@map("reconciliation_items")
+}
+
+model BankStatement {
+  id         String   @id @default(uuid())
+  bankId     String
+  fileName   String
+  uploadedAt DateTime @default(now())
+  totalItems Int
+  matchedItems Int     @default(0)
+  rawData    Json     // Parsed statement data
+  
+  @@map("bank_statements")
+}
+
+model Alert {
+  id          String      @id @default(uuid())
+  type        AlertType
+  title       String
+  description String
+  severity    AlertSeverity @default(INFO)
+  accountId   String?
+  agentId     String?
+  data        Json?       // Alert-specific data
+  
+  // Status
+  isRead      Boolean     @default(false)
+  isResolved  Boolean     @default(false)
+  resolvedAt  DateTime?
+  resolvedBy  String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@index([isRead, isResolved])
+  @@index([createdAt])
+  @@map("alerts")
+}
+
+model WeeklyReport {
+  id         String   @id @default(uuid())
+  bankId     String
+  weekStart  DateTime
+  weekEnd    DateTime
+  filePath   String   // Supabase storage path
+  emailSent  Boolean  @default(false)
+  sentAt     DateTime?
+  
+  // Metrics
+  totalAccounts     Int
+  totalCollections  Decimal @db.Decimal(15,2)
+  collectionRate    Decimal @db.Decimal(5,2)
+  
+  createdAt DateTime @default(now())
+  
+  // Relations
+  bank Bank @relation(fields: [bankId], references: [id])
+  
+  @@unique([bankId, weekStart])
+  @@map("weekly_reports")
+}
+
+model EventLog {
+  id        String    @id @default(uuid())
+  userId    String?
+  action    String    // CREATE, UPDATE, DELETE, APPROVE, REJECT, etc.
+  resource  String    // accounts, collections, users, etc.
+  resourceId String?
+  oldData   Json?
+  newData   Json?
+  ipAddress String?
+  userAgent String?
+  
+  createdAt DateTime @default(now())
+  
+  // Relations
+  user User? @relation(fields: [userId], references: [id])
+  
+  @@index([userId])
+  @@index([action])
+  @@index([resource])
+  @@index([createdAt])
+  @@map("event_logs")
+}
+
+// Enums
+enum UserRole {
+  ADMIN
+  AGENT
+  AUDITOR
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum BatchStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum VisitType {
+  PHONE
+  FIELD
+  FOLLOWUP
+  PTP
+}
+
+enum CollectionType {
+  BKASH
+  NAGAD
+  CASH
+  BANK_DEPOSIT
+}
+
+enum CollectionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AlertType {
+  SLA_BREACH
+  VARIANCE
+  MISSED_PTP
+  HIGH_OVERDUE
+  NO_UPDATE
+  SYSTEM
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  ERROR
+  CRITICAL
+}
